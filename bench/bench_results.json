@@ -1,0 +1,46 @@
+{
+ "generated_at": "2026-07-26T04:43:09",
+ "note": "synthetic-fleet approximation; production numbers in README.md come from the authors' live-fleet study",
+ "db": "C:\\Users\\BLAKES~1\\AppData\\Local\\Temp\\prebrief-bench-j6i8kh0c\\bench.db",
+ "seed": {
+  "sessions": 40,
+  "tool_events": 500,
+  "builds": 3,
+  "decisions": 6,
+  "traversals": 25,
+  "events": 74
+ },
+ "seed_s": 0.02,
+ "latency": {
+  "full_brief": {
+   "median_ms": 0.2,
+   "min_ms": 0.19,
+   "max_ms": 0.52,
+   "n": 10
+  },
+  "delta_brief": {
+   "median_ms": 0.01,
+   "min_ms": 0.01,
+   "max_ms": 0.05,
+   "n": 10
+  },
+  "compose_first_contact": {
+   "median_ms": 0.57,
+   "min_ms": 0.43,
+   "max_ms": 9.85,
+   "n": 5
+  },
+  "compose_delta": {
+   "median_ms": 0.07,
+   "min_ms": 0.07,
+   "max_ms": 0.18,
+   "n": 5
+  }
+ },
+ "dedupe": {
+  "first_payload_chars": 3520,
+  "second_payload_chars": 206,
+  "ratio": 17.1,
+  "second_payload_head": "== FLEET UPDATE for dedupe-probe (since wm 74) ==\nFLEET ATTENTION (24h):\n  6x :: which tool fails most on this fleet\n  5"
+ }
+}

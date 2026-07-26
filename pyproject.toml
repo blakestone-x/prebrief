@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prebrief"
+version = "0.1.0"
+description = "Context orchestrator for AI agent fleets: capture activity, compose per-agent moving-target briefs, inject via Claude Code hooks."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Blake Stone" }]
+dependencies = []
+
+[project.scripts]
+prebrief = "prebrief.cli:main"
+
+[tool.setuptools]
+packages = ["prebrief"]
