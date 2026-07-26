@@ -16,7 +16,7 @@ only the difference — the "moving target"; and (3) *task-aware inlining*, in
 which the composer follows pointers on the agent's behalf when its stated task
 matches an open build. On a live production substrate of ~6,600 agent
 sessions, a fresh agent answering fleet-history questions from the composed
-map reached 1.000 accuracy versus 0.094 for keyword-retrieved raw snippets at
+map reached 1.000 accuracy versus 0.750 for an agent permitted to compute over the raw corpus, and 0.188 for keyword-retrieved snippets, at
 a comparable context budget (n=32 cells); structured handoffs at an equal
 700-token budget passed 0.907 of contract checks versus 0.859 for prose and
 halved successor rework (5 vs 10 items, n=18 pipelines); payload composition
@@ -63,7 +63,7 @@ via a bundled synthetic-fleet benchmark.
    context matters.
 3. **Map-vs-dump cold-start result + system design.** A fresh agent answering
    ground-truth questions about its fleet's real history scored 1.000 from the
-   composed map versus 0.094 from equal-budget keyword-retrieved raw snippets
+   composed map versus 0.750 from a compute-capable agent baseline (which ties the map on corpus-computable questions but scores 0.000 on coordination-state questions) and 0.188 from keyword-retrieved snippets
    (n=32 cells, ~1,150 vs ~1,670 tokens) — and the full design (capture →
    store → projection → delivery-aware injection, all failing open) survived a
    9/9 live end-to-end proof on a production harness.
@@ -151,3 +151,16 @@ via a bundled synthetic-fleet benchmark.
   arm B and logs it.
 - **Analysis.** Per-session unit, cluster by project; report effect sizes with
   bootstrap CIs; publish raw event exports alongside the paper.
+
+
+## Honest scope of the cold-start result
+
+Against a baseline permitted to run read-only commands over the parsed corpus,
+the map's accuracy advantage on *corpus-computable* questions disappears
+(1.000 vs 1.000 on 6 of 8). The advantages that survive are cost (6.5x fewer
+context tokens, 2.9x lower wall-clock, because the computation is already done)
+and coverage (the compute-capable agent scores 0.000 on questions whose answers
+live in coordination state or in derived fields absent from raw history —
+verified by checking the corpus directly, not inferred from the failure).
+Claims in this paper are scoped accordingly: the contribution is cheap,
+complete fleet-state delivery, not superior reasoning.

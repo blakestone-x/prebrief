@@ -98,8 +98,8 @@ design), not on a demo dataset.
 
 | result | measurement |
 |---|---|
-| Cold-start map-vs-dump answer accuracy | **1.000 vs 0.094** (MAP vs raw-snippet DUMP arm) at ~1,150 vs ~1,670 context tokens, n=32 cells |
-| Structured-vs-prose handoff, equal 700-token budget | contract pass **0.907 vs 0.859**; successor rework halved (5 vs 10 items), n=18 pipelines |
+| Cold-start accuracy vs a baseline that can COMPUTE | MAP **1.000** / computing-agent **0.750** / naive-retrieval 0.188 (48 cells). On the 6 questions answerable from raw history the computing agent ties the map at 1.000 — the map's win there is **cost**: 1,157 vs 7,580 context tokens (6.5x) and 2.64s vs 7.63s (2.9x). On the 2 questions whose answers live in coordination state or derived fields, the agent scores **0.000** at any budget. |
+| Handoff fidelity, paired design, equal 700-token budget | structured **0.930** vs prose 0.854 pass rate; decision contradictions **2 vs 9**; work redone **2 vs 7**; 8 wins / 4 ties / 0 losses, sign test **p=0.004** (24 pipelines, Agent A's artifact held byte-identical across arms) |
 | Per-agent payload compose | **0.5–1.1 s** full brief, **0.12–0.46 s** delta |
 | Second-blink dedupe | first payload **2,425 chars → 130 chars** on the immediately following compose |
 | End-to-end live proof | **9/9** checks passed, including injection into a real Claude Code session |
