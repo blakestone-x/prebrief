@@ -9,6 +9,9 @@ Subcommands:
   payload <agent> <session> [--role --task]  print the composed injection
   assess                                   24h stats + optional local-model
                                            verdict -> report + observation event
+  project [--db PATH] [--upto ID]          fold pending events into projections
+  rebuild [--db PATH]                      wipe projections, replay the whole
+                                           log (proves they are derived)
 
 Stdlib only. Every subcommand fails open: errors degrade to a smaller result
 and a stderr note, exit code 0.
@@ -107,7 +110,9 @@ def cmd_enroll(args):
 
 def cmd_brief(args):
     from prebrief import brief
-    text, wm = brief.full_brief(_store())
+    # No --project = the operator view (every tenant). Agents never get this
+    # path; they go through inject.compose, which is always project-scoped.
+    text, wm = brief.full_brief(_store(), project=getattr(args, "project", None))
     print(text)
     print(f"(watermark {wm})", file=sys.stderr)
 
@@ -115,7 +120,38 @@ def cmd_brief(args):
 def cmd_payload(args):
     from prebrief import inject
     print(inject.compose(_store(), args.agent, args.session,
-                         role=args.role, task=args.task))
+                         role=args.role, task=args.task,
+                         project=args.project))
+
+
+# ---------------------------------------------------------------- projector
+
+def _fmt_counts(counts):
+    """One-line render of a projector counts dict, in a stable key order."""
+    order = ("events", "plan_node", "decision", "claim", "awareness",
+             "skipped", "last_event_id")
+    parts = [f"{k}={counts.get(k, 0)}" for k in order if k in counts]
+    if counts.get("error"):
+        parts.append(f"error={counts['error']}")
+    return " ".join(parts)
+
+
+def cmd_project(args):
+    """Fold every event past the cursor into the projection tables."""
+    from prebrief import projector
+    counts = projector.project_events(_store(args.db), upto=args.upto)
+    print("projected: " + _fmt_counts(counts))
+
+
+def cmd_rebuild(args):
+    """Wipe the projections and replay the entire log from event 1.
+
+    Rows written directly to a projection table (the deprecated client.plan /
+    client.decide path) have no event behind them and do NOT survive.
+    """
+    from prebrief import projector
+    counts = projector.rebuild(_store(args.db))
+    print("rebuilt: " + _fmt_counts(counts))
 
 
 # ------------------------------------------------------------------- assess
@@ -161,7 +197,7 @@ def _assess_stats(store):
         "SELECT count(*) FROM events WHERE kind='observation' "
         "AND payload LIKE '%traversal%' AND ts>?", (ev_cut,))
     s["open_decisions"] = _one(store,
-        "SELECT count(*) FROM decision WHERE status='active'")
+        "SELECT count(*) FROM decision WHERE status='standing'")
     s["tool_errors"] = _one(store,
         "SELECT coalesce(sum(is_error),0), count(*) FROM tool_events "
         "WHERE ts>?", (tool_cut,))
@@ -263,6 +299,8 @@ def main(argv=None):
     p.set_defaults(fn=cmd_enroll)
 
     p = sub.add_parser("brief", help="print the current full fleet brief")
+    p.add_argument("--project", default=None,
+                   help="scope to one project (default: all — operator view)")
     p.set_defaults(fn=cmd_brief)
 
     p = sub.add_parser("payload", help="print the composed injection payload")
@@ -270,11 +308,26 @@ def main(argv=None):
     p.add_argument("session")
     p.add_argument("--role", default="builder")
     p.add_argument("--task", default="")
+    p.add_argument("--project", default="default",
+                   help="tenant this payload is composed for")
     p.set_defaults(fn=cmd_payload)
 
     p = sub.add_parser("assess",
                        help="24h stats + verdict -> report + observation event")
     p.set_defaults(fn=cmd_assess)
+
+    p = sub.add_parser("project",
+                       help="fold pending events into the projection tables")
+    p.add_argument("--db", default=None, help="store path override")
+    p.add_argument("--upto", type=int, default=None,
+                   help="stop at this event id (default: end of log)")
+    p.set_defaults(fn=cmd_project)
+
+    p = sub.add_parser(
+        "rebuild",
+        help="wipe projections and replay the whole log (they are derived)")
+    p.add_argument("--db", default=None, help="store path override")
+    p.set_defaults(fn=cmd_rebuild)
 
     args = ap.parse_args(argv)
     try:

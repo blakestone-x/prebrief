@@ -7,9 +7,16 @@ traversal manual so the brief is also the map's own user manual.
 
 full_brief(store)          -> (text, watermark)   session start / spawn
 delta_brief(store, since)  -> (text, watermark)   per-turn: only what changed
+
+R2: both take an optional `project`. When given, only that project's rows (plus
+rows explicitly marked shared) are rendered, and any row from another project
+carries a [from project:X] tag. project=None keeps the pre-R2 unscoped view for
+operator-level callers (`prebrief brief`).
 """
 import json
 import time
+
+from .store import norm_project, scope_clause
 
 BUDGET_CHARS = 5200   # ~1,300 tokens hard ceiling for the full brief
 
@@ -37,17 +44,44 @@ def _payload_head(raw, n=60):
         return ""
 
 
-def full_brief(store):
+def origin_tag(row_project, row_origin, project):
+    """Provenance prefix for a row rendered into `project`'s context.
+
+    Empty for same-project rows; for a shared row that crossed a boundary it is
+    an explicit '[from project:X]' (plus the asserting agent when known), so the
+    reader can never mistake another tenant's text for its own state.
+    """
+    try:
+        rp = norm_project(row_project)
+        if project is None or rp == norm_project(project):
+            return ""
+        tag = f"[from project:{rp}]"
+        if row_origin and str(row_origin) != rp:
+            tag += f"[origin:{str(row_origin)[:60]}]"
+        return tag + " "
+    except Exception:
+        return "[from project:?] "
+
+
+def full_brief(store, project=None):
     """Render the full fleet brief. Returns (text, watermark). Fails open:
     any section that errors is simply absent."""
     out = []
     wm = 0
+    proj = None if project is None else norm_project(project)
+    scoped, sp = scope_clause(proj)                       # project + shared
+    own, op = scope_clause(proj, shared=False)            # project only
+    nscoped, nsp = scope_clause(proj, prefix="n")         # aliased join
     try:
-        rows = store.sql("SELECT COALESCE(MAX(id),0) FROM events")
+        rows = store.sql(
+            f"SELECT COALESCE(MAX(id),0) FROM events WHERE {own}", op)
         wm = int(rows[0][0]) if rows else 0
     except Exception:
         wm = 0
     out.append(f"== FLEET BRIEF @ {_ts()} (watermark {wm}) ==")
+    if proj is not None:
+        out.append(f"Scope: project '{proj}' (plus rows other projects "
+                   f"explicitly shared, tagged [from project:X]).")
     out.append("Freshness: rows below are live projections, not curated text; "
                "regenerate via prebrief.brief.full_brief.")
 
@@ -56,8 +90,8 @@ def full_brief(store):
         cutoff = time.time() - 15 * 60
         live = store.sql(
             "SELECT agent_id, role, status, substr(COALESCE(task_head,''),1,60) "
-            "FROM awareness WHERE updated_at > ? "
-            "ORDER BY updated_at DESC LIMIT 8", (cutoff,))
+            f"FROM awareness WHERE updated_at > ? AND {own} "
+            "ORDER BY updated_at DESC LIMIT 8", (cutoff,) + op)
         out.append(f"\n-- LIVE AGENTS ({len(live)}) --")
         for r in live:
             out.append(f"  {r[0]} [{r[1]}/{r[2]}] {r[3]}")
@@ -69,14 +103,17 @@ def full_brief(store):
         builds = store.sql(
             "SELECT n.id, n.title, "
             "SUM(CASE WHEN c.status='open' THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN c.status='done' THEN 1 ELSE 0 END) "
+            "SUM(CASE WHEN c.status='done' THEN 1 ELSE 0 END), "
+            "COALESCE(n.project,'default'), COALESCE(n.origin,'') "
             "FROM plan_node n LEFT JOIN plan_node c ON c.root_id = n.id "
             "WHERE n.kind='goal' AND n.status NOT IN ('done','abandoned') "
-            "GROUP BY n.id, n.title ORDER BY n.id DESC LIMIT 5")
+            f"AND {nscoped} "
+            "GROUP BY n.id, n.title ORDER BY n.id DESC LIMIT 5", nsp)
         out.append("\n-- ACTIVE BUILDS --")
         for r in builds:
+            tag = origin_tag(r[4], r[5], proj)
             out.append(
-                f"  build:{r[0]} \"{r[1]}\" open={int(r[2] or 0)} "
+                f"  {tag}build:{r[0]} \"{r[1]}\" open={int(r[2] or 0)} "
                 f"done={int(r[3] or 0)} "
                 f"(join: SELECT * FROM plan_node WHERE root_id={r[0]})")
     except Exception:
@@ -85,12 +122,15 @@ def full_brief(store):
     # -- standing decisions ------------------------------------------------
     try:
         decs = store.sql(
-            "SELECT id, subject, substr(COALESCE(choice,''),1,70) FROM decision "
-            "WHERE status='standing' ORDER BY id DESC LIMIT 5")
+            "SELECT id, subject, substr(COALESCE(choice,''),1,70), "
+            "COALESCE(project,'default'), COALESCE(origin,'') FROM decision "
+            f"WHERE status='standing' AND {scoped} "
+            "ORDER BY id DESC LIMIT 5", sp)
         if decs:
             out.append("-- STANDING DECISIONS (newest) --")
             for r in decs:
-                out.append(f"  d{r[0]} [{r[1]}] {r[2]}")
+                out.append(f"  {origin_tag(r[3], r[4], proj)}d{r[0]} "
+                           f"[{r[1]}] {r[2]}")
     except Exception:
         pass
 
@@ -100,20 +140,21 @@ def full_brief(store):
         for r in store.sql(
                 "SELECT tool, COUNT(*) n, "
                 "ROUND(1.0*SUM(is_error)/COUNT(*),3) err "
-                "FROM tool_events GROUP BY tool "
-                "HAVING n >= 20 AND err > 0 ORDER BY err DESC LIMIT 3"):
+                f"FROM tool_events WHERE {own} GROUP BY tool "
+                "HAVING n >= 20 AND err > 0 ORDER BY err DESC LIMIT 3", op):
             out.append(f"  tool {r[0]}: err {r[2]} over n={r[1]}")
         for r in store.sql(
                 "SELECT path, ROUND(1.0*SUM(is_error)/COUNT(*),3) err, "
                 "COUNT(*) touches FROM tool_events WHERE path IS NOT NULL "
+                f"AND {own} "
                 "GROUP BY path HAVING touches >= 10 AND err > 0 "
-                "ORDER BY err DESC LIMIT 3"):
+                "ORDER BY err DESC LIMIT 3", op):
             out.append(f"  path {str(r[0])[:70]}: err {r[1]} over {r[2]} touches")
     except Exception:
         pass
 
     # -- fleet attention: what agents kept asking (24h) --------------------
-    att = attention(store)
+    att = attention(store, project=proj)
     if att:
         out.append("\n-- FLEET ATTENTION (most-asked, 24h) --")
         out.extend(att)
@@ -123,17 +164,21 @@ def full_brief(store):
     return text[:BUDGET_CHARS], wm
 
 
-def delta_brief(store, since):
+def delta_brief(store, since, project=None):
     """Render only what changed since a watermark. Returns (text, watermark);
-    ('', since) when nothing changed."""
+    ('', since) when nothing changed. Events never cross a project boundary —
+    there is no shared-event concept, only shared decisions/plan nodes."""
     try:
         since = int(since)
     except Exception:
         since = 0
+    proj = None if project is None else norm_project(project)
+    own, op = scope_clause(proj, shared=False)
     try:
         ev = store.sql(
             "SELECT id, kind, actor, substr(COALESCE(payload,''),1,60) "
-            "FROM events WHERE id > ? ORDER BY id LIMIT 12", (since,))
+            f"FROM events WHERE id > ? AND {own} ORDER BY id LIMIT 12",
+            (since,) + op)
     except Exception:
         ev = []
     if not ev:
@@ -145,16 +190,20 @@ def delta_brief(store, since):
     return "\n".join(out), new_wm
 
 
-def attention(store, limit=4, hours=24):
+def attention(store, limit=4, hours=24, project=None):
     """Aggregate traversal observations: what the fleet kept asking lately.
-    Returns formatted lines (possibly empty)."""
+    Returns formatted lines (possibly empty). Scoped to one project when given
+    — what another tenant is searching for is that tenant's business."""
     lines = []
+    own, op = scope_clause(None if project is None else norm_project(project),
+                           shared=False)
     try:
         cutoff = time.time() - hours * 3600
         rows = store.sql(
             "SELECT payload FROM events "
-            "WHERE kind='observation' AND ts > ? ORDER BY id DESC LIMIT 200",
-            (cutoff,))
+            f"WHERE kind='observation' AND ts > ? AND {own} "
+            "ORDER BY id DESC LIMIT 200",
+            (cutoff,) + op)
         counts = {}
         for (raw,) in rows:
             try:

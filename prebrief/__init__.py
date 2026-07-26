@@ -8,7 +8,10 @@ component fails open.
 from .store import Store, default_db_path
 from .brief import full_brief, delta_brief
 from .inject import compose
-from .client import register, heartbeat, tools, traverse, end
+from .client import (register, heartbeat, tools, traverse, end,
+                     open_plan, set_plan_status, make_decision,
+                     supersede_decision, assert_claim)
+from .projector import project_events, rebuild
 
 __version__ = "0.1.0"
 
@@ -17,5 +20,10 @@ __all__ = [
     "full_brief", "delta_brief",
     "compose",
     "register", "heartbeat", "tools", "traverse", "end",
+    # log-first emitters (write events only; the projector derives the rows)
+    "open_plan", "set_plan_status", "make_decision", "supersede_decision",
+    "assert_claim",
+    # the fold
+    "project_events", "rebuild",
     "__version__",
 ]
