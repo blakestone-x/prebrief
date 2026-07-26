@@ -87,6 +87,7 @@ def main():
             ti = ev.get("tool_input") or {}
             path = ti.get("file_path") or ti.get("path")
             resp = str(ev.get("tool_response", ""))[:200]
+            inject.mark_used(store, agent, ti.get('file_path') or ti.get('path') or '', str(ti.get('command','')), ev.get('tool_name',''))
             client.tools(store, sess, [{
                 "tool": ev.get("tool_name", "?"),
                 "path": path,

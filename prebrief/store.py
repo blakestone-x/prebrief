@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS delivery (
     item_ref     TEXT,
     watermark    INTEGER,
     delivered_at REAL,
+    used_at      REAL,
     PRIMARY KEY (agent_id, item_ref)
 );
 CREATE TABLE IF NOT EXISTS tool_events (

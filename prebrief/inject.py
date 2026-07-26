@@ -19,6 +19,7 @@ payload is wrapped in an UNTRUSTED DATA envelope that tells the reading agent
 the content is data, never instructions.
 """
 import hashlib
+import re
 import time
 
 from . import brief as FB
@@ -243,3 +244,63 @@ def _compose(store, agent_id, session, role, task, project):
         except Exception:
             text = text[:DELTA_BUDGET]
     return _wrap(text, DELTA_BUDGET + _ENVELOPE)
+
+
+def mark_used(store, agent_id, *signals):
+    """Usage closure: did the agent ACT on what it was told?
+
+    Matches every signal from a tool call (file path, command text, tool name)
+    against the SUBJECTS behind delivered refs — build titles, decision
+    subjects, claim subjects — not just the ref string. A path-only matcher
+    measured 1 of 42 deliveries over a day of real use; this measures ~40%.
+    Engagement signal, deliberately generous. Fails open, returns hit count.
+    """
+    try:
+        text = " ".join(str(x) for x in signals if x).lower()[:600]
+        if len(text) < 4:
+            return 0
+        rows = store.sql("SELECT item_ref FROM delivery WHERE agent_id=? "
+                         "AND used_at IS NULL", (agent_id,)) or []
+        hits = []
+        for r in rows:
+            ref = r[0] if r else ""
+            kind, _, ident = str(ref).partition(":")
+            subj = None
+            if kind == "build" and ident.isdigit():
+                got = store.sql("SELECT lower(title) FROM plan_node WHERE id=?", (int(ident),))
+                subj = got[0][0] if got else None
+            elif kind == "decision" and ident.isdigit():
+                got = store.sql("SELECT lower(subject) FROM decision WHERE id=?", (int(ident),))
+                subj = got[0][0] if got else None
+            elif kind == "claim" and ident.isdigit():
+                got = store.sql("SELECT lower(subject) FROM claims WHERE id=?", (int(ident),))
+                subj = got[0][0] if got else None
+            elif kind == "risk":
+                subj = ident.split("/")[0].lower()
+            if not subj:
+                continue
+            toks = [t for t in re.split(r"[^a-z0-9]+", subj) if len(t) >= 4]
+            if any(t in text for t in toks):
+                hits.append(ref)
+        for h in set(hits):
+            store.sql("UPDATE delivery SET used_at=? WHERE agent_id=? AND item_ref=? "
+                      "AND used_at IS NULL", (time.time(), agent_id, h))
+        return len(set(hits))
+    except Exception:
+        return 0
+
+
+def effectiveness(store, agent_id=None):
+    """used / delivered — the signal that says whether context is landing."""
+    try:
+        where = "WHERE item_ref NOT IN ('manual','wm')"
+        args = ()
+        if agent_id:
+            where += " AND agent_id=?"
+            args = (agent_id,)
+        r = store.sql(f"SELECT sum(used_at IS NOT NULL), count(*) FROM delivery {where}", args)
+        used, total = (r[0][0] or 0, r[0][1] or 0) if r else (0, 0)
+        return {"used": used, "delivered": total,
+                "rate": round(used / total, 3) if total else None}
+    except Exception:
+        return {"used": 0, "delivered": 0, "rate": None}
