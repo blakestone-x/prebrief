@@ -108,6 +108,14 @@ def cmd_enroll(args):
           f"(changed={changed}; backup kept beside settings.json)")
 
 
+def cmd_doctor(args):
+    """Self-diagnostics against the live database. Exit 1 on any ERROR."""
+    from prebrief import doctor
+    text, code = doctor.report(_store(), as_json=getattr(args, "json", False))
+    print(text)
+    return code
+
+
 def cmd_brief(args):
     from prebrief import brief
     # No --project = the operator view (every tenant). Agents never get this
@@ -131,6 +139,12 @@ def _fmt_counts(counts):
     order = ("events", "plan_node", "decision", "claim", "awareness",
              "skipped", "last_event_id")
     parts = [f"{k}={counts.get(k, 0)}" for k in order if k in counts]
+    # Only worth screen space when non-zero, but never hidden when they fire:
+    # a refused cross-tenant write or a dead-lettered event is a thing an
+    # operator must be able to see without reading stderr.
+    for k in ("cross_tenant", "dead_letter", "errors"):
+        if counts.get(k):
+            parts.append(f"{k}={counts[k]}")
     if counts.get("error"):
         parts.append(f"error={counts['error']}")
     return " ".join(parts)
@@ -297,6 +311,11 @@ def main(argv=None):
     p.add_argument("--remove", action="store_true",
                    help="remove our hook groups (others untouched)")
     p.set_defaults(fn=cmd_enroll)
+
+    d = sub.add_parser("doctor", help="self-diagnostic checks against the live db")
+    d.add_argument("--db")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(fn=cmd_doctor)
 
     p = sub.add_parser("brief", help="print the current full fleet brief")
     p.add_argument("--project", default=None,

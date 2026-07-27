@@ -13,7 +13,7 @@ from .client import (register, heartbeat, tools, traverse, end,
                      supersede_decision, assert_claim)
 from .projector import project_events, rebuild
 
-__version__ = "0.1.0"
+__version__ = "0.2.2"
 
 __all__ = [
     "Store", "default_db_path",

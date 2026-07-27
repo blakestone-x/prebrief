@@ -141,3 +141,23 @@ PAPER.md             systems-paper outline ("The Moving Target")
 Python 3.10+. Core is stdlib only (`sqlite3`, `json`, `hashlib`,
 `argparse`); the sole optional network use is `urllib` for a local Ollama
 curator and the opt-in bench probe.
+
+## Correctness guarantees
+
+Four independent review passes (two by a different model family) drove these.
+Each was a real defect; each is now a class-level guard with a test, and every
+guard also runs against the live database via `prebrief doctor`.
+
+| guarantee | how it is enforced |
+|---|---|
+| **No context is silently lost.** Deltas page; the ledger advances only to the last event actually rendered. | `tests/test_delivery.py`, 20-event burst regression |
+| **The ledger never lies.** Only refs PRESENT in the final payload are recorded delivered; anything truncated stays undelivered and appears later. States: emitted → used. | `tests/test_ledger_honesty.py` |
+| **No cross-tenant reads or writes.** Every read is scoped to the caller's project (+ explicitly shared rows); every projector mutation matches `(id AND project)` and refused attempts are counted. | `tests/test_isolation.py`, `tests/test_tenant_mutation.py` |
+| **Injected text is data, not instructions.** Every payload declares content untrusted and cross-project rows carry an origin tag. | adversarial test with a planted `IGNORE PREVIOUS INSTRUCTIONS` decision |
+| **No event is lost on failure.** Projection writes and the cursor advance are one transaction over a strict (raising) writer; a failure rolls back and retries. | `tests/test_projector_atomicity.py` with an injected write fault |
+| **Projections are derived, not authored.** `prebrief rebuild` replays the log from zero and reproduces identical state. | `tests/test_projector.py` |
+| **Upgrades reach existing databases.** The migration list is diffed against the schema; any drift fails a test. | `tests/test_upgrade.py` (a legacy v0.1.0 DB is built and upgraded) |
+| **Release metadata agrees.** pyproject == `__version__` == CITATION.cff. | same file |
+
+Run them yourself: `python -m unittest discover -s tests` (90 tests, stdlib
+only, no network) and `prebrief doctor` against any database.

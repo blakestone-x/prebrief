@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run test suite (stdlib only — no install step needed)
+        run: python -m unittest discover -s tests -v
+      - name: Self-diagnostics must pass on a fresh database
+        run: |
+          python -c "import sys; sys.path.insert(0,'.');
+          import os, tempfile;
+          os.environ['PREBRIEF_DB']=os.path.join(tempfile.mkdtemp(),'ci.db');
+          from prebrief import Store, doctor;
+          from prebrief.store import default_db_path;
+          t,c=doctor.report(Store(default_db_path()));
+          print(t); sys.exit(c)"
+      - name: Benchmark must run without network
+        run: python bench/bench.py

@@ -37,16 +37,34 @@ Event kinds folded:
 Anything else (e.g. 'observation') is counted as skipped and ignored — an
 unknown kind must never stall or crash the fold.
 
+Tenancy (R2): a transition event may only move a row its OWN project owns.
+Every mutation is keyed on (id, project), never on id alone, and a target owned
+by another project is refused and tallied as `cross_tenant` — otherwise a
+project-Bravo `plan.done` naming id 7 would close project-Alpha's node 7, which
+is a cross-tenant write dressed up as a fold.
+
+Atomicity: each event's projection writes AND the cursor advance happen inside
+ONE transaction, through the store's STRICT writer. If a write fails, the
+transaction rolls back and the cursor stays put, so the event is retried on the
+next run. The alternative — a swallowed write plus an advanced cursor — drops
+the event from the derived state permanently, with the log still claiming it was
+folded. Only an explicitly malformed or unknown event is skipped FORWARD
+(tallied as `dead_letter`), because retrying it would wedge the fold forever.
+
 NOT projections, and therefore NOT wiped by rebuild(): `events` (the log),
 `tool_events` (raw capture), `delivery` (a per-recipient ledger of what was
 already shown, which is history, not derived state). Note also that state with
 no event behind it is not reconstructible by definition — `awareness.files_hot`
 is written by client.heartbeat and resets on rebuild.
 
-Everything here fails open: a broken store or a malformed payload degrades to a
-smaller count and a stderr note, never an exception to the caller.
+Everything here fails open TO THE CALLER: a broken store or a malformed payload
+degrades to a smaller count and a stderr note, never an exception. What it does
+not do is fail open to the DATABASE — an infrastructure failure stops the fold
+with the cursor intact rather than pretending the work happened.
 """
+import contextlib
 import json
+import sqlite3
 import sys
 import time
 
@@ -83,6 +101,11 @@ _PLAN_STATUS = {
     "plan.block": "blocked",
 }
 
+# The line between "this event is bad" and "the database is bad". A bad event
+# is skipped forward (retrying it would wedge the fold forever); a bad database
+# rolls the event back and leaves the cursor alone, so the next run retries it.
+_INFRA_ERRORS = (sqlite3.Error, MemoryError, OSError, RuntimeError)
+
 
 # ------------------------------------------------------------------ plumbing
 
@@ -100,7 +123,24 @@ class _Ctx:
         self._cols = {}
         self.claims = None
         self.counts = {"events": 0, "plan_node": 0, "decision": 0,
-                       "claim": 0, "awareness": 0, "skipped": 0}
+                       "claim": 0, "awareness": 0, "skipped": 0,
+                       # observability for the two failure modes that used to
+                       # be invisible: refused cross-tenant writes, events the
+                       # fold gave up on, and infrastructure halts.
+                       "cross_tenant": 0, "dead_letter": 0, "errors": 0}
+
+    def write(self, query, params=()):
+        """Issue a projection write that must NOT fail silently.
+
+        Routed through the store's strict writer so a failure propagates to
+        project_events(), which rolls the event's transaction back and leaves
+        the cursor where it was. Falls back to the fail-open sql() only for a
+        legacy store object that predates execute_strict().
+        """
+        fn = getattr(self.store, "execute_strict", None)
+        if fn is None:
+            return self.store.sql(query, params)
+        return fn(query, params)
 
     def cols(self, table):
         if table not in self._cols:
@@ -163,16 +203,71 @@ def last_event_id(store):
         return 0
 
 
+_CURSOR_SQL = (
+    "INSERT INTO projector_state (id, last_event_id, updated_at) "
+    "VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET "
+    "last_event_id=excluded.last_event_id, "
+    "updated_at=excluded.updated_at")
+
+
 def _set_cursor(store, eid):
+    """Fail-open cursor write, for callers outside a transaction (rebuild)."""
     try:
-        store.sql(
-            "INSERT INTO projector_state (id, last_event_id, updated_at) "
-            "VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET "
-            "last_event_id=excluded.last_event_id, "
-            "updated_at=excluded.updated_at",
-            (int(eid), time.time()))
+        store.sql(_CURSOR_SQL, (int(eid), time.time()))
     except Exception as e:
         print(f"prebrief projector cursor err: {e}", file=sys.stderr)
+
+
+def _txn(store):
+    """The store's transaction, or a no-op for a store that lacks one.
+
+    A legacy store object without transaction() keeps the old (unsafe) shape
+    rather than crashing; every store this package ships has one.
+    """
+    fn = getattr(store, "transaction", None)
+    return fn() if fn is not None else contextlib.nullcontext(store)
+
+
+# ------------------------------------------------------------------- tenancy
+
+def _scoped(ctx, table, rid, project):
+    """(where_fragment, params) pinning a mutation to ONE row of ONE project.
+
+    Never `WHERE id=?`. The project predicate is what stops project Bravo's
+    `plan.done` from closing project Alpha's node with the same id. On a
+    pre-R2 table (no project column) there is no tenancy to enforce and the
+    clause degrades to the id alone.
+    """
+    if "project" not in ctx.cols(table):
+        return "id=?", (rid,)
+    return "id=? AND COALESCE(project,'default')=?", (rid, project)
+
+
+def _tenant_ok(ctx, table, rid, project):
+    """May an event from `project` mutate row `rid` of `table`?
+
+    True when the row is absent (the scoped UPDATE is then a harmless no-op)
+    or owned by the same project. False when another project owns it — that is
+    a cross-tenant mutation attempt: it is refused, tallied, and noted on
+    stderr so it is observable rather than silent.
+
+    This lookup only CLASSIFIES; the guarantee comes from _scoped(), which
+    keeps the project predicate in the statement itself. So a fail-open read
+    here cannot open a hole.
+    """
+    if "project" not in ctx.cols(table):
+        return True
+    rows = ctx.store.sql(
+        f"SELECT COALESCE(project,'default') FROM {table} WHERE id=?", (rid,))
+    if not rows:
+        return True
+    owner = str(rows[0][0])
+    if owner == project:
+        return True
+    ctx.counts["cross_tenant"] += 1
+    print(f"prebrief projector refused cross-tenant write: {table} id={rid} "
+          f"owned by {owner!r}, event from {project!r}", file=sys.stderr)
+    return False
 
 
 def _upsert(ctx, table, row, key, update):
@@ -192,7 +287,7 @@ def _upsert(ctx, table, row, key, update):
     sets = ",".join(f"{c}=excluded.{c}" for c in update if c in present)
     sql = f"INSERT INTO {table} ({cols}) VALUES ({marks}) ON CONFLICT({key}) DO "
     sql += f"UPDATE SET {sets}" if sets else "NOTHING"
-    ctx.store.sql(sql, tuple(v for _, v in items))
+    ctx.write(sql, tuple(v for _, v in items))
     return True
 
 
@@ -206,8 +301,8 @@ def _insert_ignore(ctx, table, row):
         return False
     cols = ",".join(c for c, _ in items)
     marks = ",".join("?" for _ in items)
-    ctx.store.sql(f"INSERT OR IGNORE INTO {table} ({cols}) VALUES ({marks})",
-                  tuple(v for _, v in items))
+    ctx.write(f"INSERT OR IGNORE INTO {table} ({cols}) VALUES ({marks})",
+              tuple(v for _, v in items))
     return True
 
 
@@ -240,6 +335,11 @@ def _txt(value, n=300):
 
 def _fold_plan_open(ctx, eid, ts, kind, actor, payload, project):
     nid = _int_or(payload.get("node_id"), eid)
+    # An explicit node_id can collide with an existing node. ON CONFLICT DO
+    # UPDATE would then rewrite another project's row, so the same tenancy
+    # check that guards the transitions guards the open.
+    if not _tenant_ok(ctx, "plan_node", nid, project):
+        return
     _upsert(ctx, "plan_node", {
         "id": nid,
         "root_id": _int_or(payload.get("root_id"), None),
@@ -261,18 +361,24 @@ def _fold_plan_status(ctx, eid, ts, kind, actor, payload, project):
     if nid is None:
         ctx.counts["skipped"] += 1
         return
+    if not _tenant_ok(ctx, "plan_node", nid, project):
+        return
     status = _PLAN_STATUS.get(kind, "open")
     owner = payload.get("owner") or (actor if kind == "plan.claim" else None)
+    where, params = _scoped(ctx, "plan_node", nid, project)
     if owner and "owner" in ctx.cols("plan_node"):
-        ctx.store.sql("UPDATE plan_node SET status=?, owner=? WHERE id=?",
-                      (status, _txt(owner, 80), nid))
+        ctx.write(f"UPDATE plan_node SET status=?, owner=? WHERE {where}",
+                  (status, _txt(owner, 80)) + params)
     else:
-        ctx.store.sql("UPDATE plan_node SET status=? WHERE id=?", (status, nid))
+        ctx.write(f"UPDATE plan_node SET status=? WHERE {where}",
+                  (status,) + params)
     ctx.counts["plan_node"] += 1
 
 
 def _fold_decision_make(ctx, eid, ts, kind, actor, payload, project):
     did = _int_or(payload.get("decision_id"), eid)
+    if not _tenant_ok(ctx, "decision", did, project):
+        return
     _upsert(ctx, "decision", {
         "id": did,
         "scope_root": _int_or(payload.get("scope_root"), None),
@@ -297,7 +403,10 @@ def _fold_decision_supersede(ctx, eid, ts, kind, actor, payload, project):
     if did is None:
         ctx.counts["skipped"] += 1
         return
-    ctx.store.sql("UPDATE decision SET status='superseded' WHERE id=?", (did,))
+    if not _tenant_ok(ctx, "decision", did, project):
+        return
+    where, params = _scoped(ctx, "decision", did, project)
+    ctx.write(f"UPDATE decision SET status='superseded' WHERE {where}", params)
     ctx.counts["decision"] += 1
 
 
@@ -332,6 +441,11 @@ def _fold_session(ctx, eid, ts, kind, actor, payload, project):
         "updated_at": ts,
         "project": project,
     }
+    # Deliberately NOT tenancy-guarded: awareness is keyed on agent_id, and an
+    # agent re-registering under a new project is the supported way to move
+    # (see client.heartbeat). Pinning the row to its first project would freeze
+    # the agent there forever. The row's `project` is rewritten to the event's,
+    # so presence follows the agent rather than leaking across the boundary.
     # session.end must not blank out role/task learned from session.start.
     update = ["status", "updated_at", "project"]
     if active:
@@ -363,14 +477,25 @@ def project_events(store, upto=None):
     the same event twice is a no-op, so a crash mid-fold is repaired simply by
     running again.
 
+    Each event is folded inside its own transaction that also carries the
+    cursor advance, so the two can never disagree: either the projection rows
+    and the new cursor both land, or neither does and the event is retried on
+    the next run. An infrastructure failure therefore STOPS the fold (counted
+    under 'errors') instead of skipping the event and reporting success.
+
     Returns a counts dict:
-      {events, plan_node, decision, claim, awareness, skipped, last_event_id}
-    Fails open — on an unusable store the counts are zeros plus an 'error' key.
+      {events, plan_node, decision, claim, awareness, skipped, cross_tenant,
+       dead_letter, errors, last_event_id}
+    where `cross_tenant` counts refused cross-project mutations, `dead_letter`
+    counts events permanently given up on, and `errors` counts halts.
+    Fails open to the CALLER — on an unusable store the counts are zeros plus
+    an 'error' key.
     """
     ctx = _Ctx(store)
     try:
         _ensure_state(store)
         cursor = last_event_id(store)
+        stalled = False
         upto = _int_or(upto, None)
         has_project = "project" in ctx.cols("events")
         proj_col = "COALESCE(project,'default')" if has_project else "'default'"
@@ -390,24 +515,49 @@ def project_events(store, upto=None):
             for eid, ts, kind, actor, payload, project in rows:
                 eid = _int_or(eid, 0)
                 fn = _HANDLERS.get(str(kind or ""))
-                if fn is None:
-                    # Unknown kind: not an error. The log is allowed to carry
-                    # kinds this version of the projector does not model.
-                    ctx.counts["skipped"] += 1
-                else:
-                    try:
-                        fn(ctx, eid, ts, str(kind), str(actor or ""),
-                           _payload(payload), str(project or "default"))
-                    except Exception as e:
-                        # One poisoned event must not stall the whole fold.
-                        ctx.counts["skipped"] += 1
-                        print(f"prebrief projector event {eid} err: {e}",
-                              file=sys.stderr)
+                # Tallies made inside a transaction that later rolls back are
+                # not true, so keep a copy to restore.
+                before = dict(ctx.counts)
+                try:
+                    with _txn(store):
+                        if fn is None:
+                            # Unknown kind: not an error. The log is allowed to
+                            # carry kinds this projector does not model.
+                            ctx.counts["skipped"] += 1
+                        else:
+                            try:
+                                fn(ctx, eid, ts, str(kind), str(actor or ""),
+                                   _payload(payload),
+                                   str(project or "default"))
+                            except _INFRA_ERRORS:
+                                # The store, not the event. Roll back and retry
+                                # this event on the next run.
+                                raise
+                            except Exception as e:
+                                # A poisoned event: retrying it forever would
+                                # wedge the fold, so it is skipped FORWARD.
+                                ctx.counts["skipped"] += 1
+                                ctx.counts["dead_letter"] += 1
+                                print(f"prebrief projector event {eid} "
+                                      f"dead-lettered: {e}", file=sys.stderr)
+                        # Same transaction as the writes above: the cursor can
+                        # never claim an event that did not land.
+                        ctx.write(_CURSOR_SQL, (int(eid), time.time()))
+                except Exception as e:
+                    ctx.counts = before
+                    ctx.counts["errors"] += 1
+                    ctx.counts["error"] = str(e)
+                    print(f"prebrief projector halted at event {eid}: {e} "
+                          f"(cursor stays at {cursor}; will retry)",
+                          file=sys.stderr)
+                    stalled = True
+                    break
                 ctx.counts["events"] += 1
                 cursor = max(cursor, eid)
-            if len(rows) < _SCAN_LIMIT:
+            if stalled or len(rows) < _SCAN_LIMIT:
                 break
-        _set_cursor(store, cursor)
+        if not stalled:
+            _set_cursor(store, cursor)
         ctx.counts["last_event_id"] = cursor
         return ctx.counts
     except Exception as e:
@@ -449,7 +599,8 @@ def rebuild(store):
     except Exception as e:
         print(f"prebrief projector rebuild err: {e}", file=sys.stderr)
         return {"events": 0, "plan_node": 0, "decision": 0, "claim": 0,
-                "awareness": 0, "skipped": 0, "last_event_id": 0,
+                "awareness": 0, "skipped": 0, "cross_tenant": 0,
+                "dead_letter": 0, "errors": 1, "last_event_id": 0,
                 "error": str(e)}
 
 

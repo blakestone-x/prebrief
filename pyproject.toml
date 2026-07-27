@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prebrief"
-version = "0.1.0"
+version = "0.2.2"
 description = "Context orchestrator for AI agent fleets: capture activity, compose per-agent moving-target briefs, inject via Claude Code hooks."
 readme = "README.md"
 requires-python = ">=3.10"

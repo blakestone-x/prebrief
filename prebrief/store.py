@@ -2,8 +2,17 @@
 
 A single SQLite database (WAL mode) holds everything Prebrief knows: the
 append-only event log, plan/decision state, agent awareness, the per-agent
-delivery ledger, and tool telemetry. Every write path fails open — an internal
+delivery ledger, and tool telemetry. The capture paths fail open — an internal
 error degrades to a no-op, never an exception to the caller.
+
+Fail-open is right for capture and for reads: a broken store must never break
+the agent being observed. It is WRONG for a derivation that also advances a
+durable cursor, because a swallowed write there loses the event forever. So
+there are two write contracts, deliberately:
+
+  * `sql()`        — fail-open. Reads, capture, best-effort upserts.
+  * `execute_strict()` / `transaction()` — RAISE. Used by the projector, whose
+    caller must be able to roll back and leave the cursor where it was.
 
 R2 (tenant isolation): every row carries the `project` that wrote it. Reads are
 scoped to the caller's project; a row only crosses a project boundary when it is
@@ -11,6 +20,7 @@ explicitly marked `shared=1`, and cross-project rows render with their origin.
 
 DB path resolution: env PREBRIEF_DB, else ~/.prebrief/prebrief.db.
 """
+import contextlib
 import hashlib
 import json
 import os
@@ -69,6 +79,7 @@ CREATE TABLE IF NOT EXISTS delivery (
     watermark    INTEGER,
     delivered_at REAL,
     used_at      REAL,
+    state        TEXT DEFAULT 'emitted',
     PRIMARY KEY (agent_id, item_ref)
 );
 CREATE TABLE IF NOT EXISTS tool_events (
@@ -96,6 +107,11 @@ CREATE INDEX IF NOT EXISTS idx_decision_project ON decision(project);
 # (table, column, declaration) — applied one at a time, each in its own
 # try/except so a re-run (column already present) is a silent no-op.
 _MIGRATIONS = (
+    ("delivery",    "used_at", "REAL"),
+    # delivery lifecycle: 'emitted' (the ref rendered into a returned payload)
+    # -> 'used' (the agent then acted on it). A single optimistic timestamp
+    # could not tell "we sent it" from "we meant to send it".
+    ("delivery",    "state",   "TEXT DEFAULT 'emitted'"),
     ("events",      "project", "TEXT DEFAULT 'default'"),
     ("plan_node",   "project", "TEXT DEFAULT 'default'"),
     ("plan_node",   "origin",  "TEXT"),
@@ -106,6 +122,56 @@ _MIGRATIONS = (
     ("awareness",   "project", "TEXT DEFAULT 'default'"),
     ("tool_events", "project", "TEXT DEFAULT 'default'"),
 )
+
+
+def declared_columns(ddl=None):
+    """Every (table, column) the schema declares — parsed from _SCHEMA.
+
+    The migration list is hand-maintained, so a column added to _SCHEMA can
+    silently never reach EXISTING databases. That is exactly how
+    delivery.used_at shipped broken in v0.2.1: new installs had it, every
+    upgrade did not. Deriving the expected set from the schema lets a test
+    fail the moment the two drift again — fixing the class, not the instance.
+    """
+    import re as _re
+    text = _SCHEMA if ddl is None else ddl
+    out = []
+    pattern = r"CREATE TABLE IF NOT EXISTS (\w+)\s*\(([^;]*?)\n\s*\)"
+    for tbl, body in _re.findall(pattern, text, _re.S):
+        for line in body.splitlines():
+            line = line.strip().rstrip(",")
+            if not line or line.upper().startswith(("PRIMARY KEY", "UNIQUE", "FOREIGN",
+                                                    "CHECK", "CONSTRAINT", "--")):
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].isidentifier():
+                out.append((tbl, parts[0]))
+    return out
+
+
+def migration_gaps():
+    """Schema columns that no migration adds to a legacy database.
+
+    Columns present in the ORIGINAL v0.1.0 shipped schema are exempt (a legacy
+    DB already has them); everything added since must be migrated.
+    """
+    v010 = {
+        "events": ("id", "hash", "ts", "kind", "actor", "session", "payload"),
+        "plan_node": ("id", "root_id", "kind", "title", "status", "owner"),
+        "decision": ("id", "scope_root", "subject", "choice", "rationale",
+                     "binds", "status"),
+        "awareness": ("agent_id", "role", "task_head", "files_hot", "status",
+                      "updated_at"),
+        "delivery": ("agent_id", "item_ref", "watermark", "delivered_at"),
+        "tool_events": ("id", "session", "tool", "path", "is_error", "ts"),
+        # tables the projector owns and creates itself
+        "projector_state": ("id", "last_event_id", "updated_at"),
+        "claims": ("id", "subject", "predicate", "body", "confidence", "status",
+                   "source", "project", "asserted_by"),
+    }
+    original = {(t, c) for t, cols in v010.items() for c in cols}
+    covered = {(t, c) for t, c, _ in _MIGRATIONS}
+    return sorted(set(declared_columns()) - covered - original)
 
 
 def norm_project(project):
@@ -181,7 +247,12 @@ class Store:
                 pass  # column already present, or table absent — both benign
 
     def sql(self, query, params=()):
-        """Run a statement; return rows as list[tuple]. [] on any error."""
+        """Run a statement; return rows as list[tuple]. [] on any error.
+
+        FAIL-OPEN, by contract. Every read path and every capture path depends
+        on that. Do not use it for a write whose loss would go unnoticed —
+        see execute_strict().
+        """
         if self._conn is None:
             return []
         try:
@@ -191,6 +262,45 @@ class Store:
         except Exception as e:
             print(f"prebrief sql err: {e}", file=sys.stderr)
             return []
+
+    def execute_strict(self, query, params=()):
+        """Run a statement and RAISE on failure. Returns rows as list[tuple].
+
+        The counterpart to sql(): identical behaviour on success, but a dead
+        store or a bad statement propagates instead of degrading to []. Write
+        paths that must be able to roll back use this — a swallowed write plus
+        an advanced cursor is silent data loss, not graceful degradation.
+
+        Raises RuntimeError when the store never opened, otherwise whatever
+        sqlite3 raised.
+        """
+        if self._conn is None:
+            raise RuntimeError("prebrief store unavailable")
+        cur = self._conn.execute(query, params)
+        return [tuple(r) for r in cur.fetchall()]
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """BEGIN IMMEDIATE ... COMMIT around a unit of write work; ROLLBACK on
+        any exception, which is then re-raised.
+
+        The connection runs in autocommit (isolation_level=None) so that the
+        capture paths never hold a write lock; the BEGIN here is therefore
+        explicit. Yields the store, so the body can call execute_strict().
+        Not reentrant — sqlite has no nested transactions.
+        """
+        if self._conn is None:
+            raise RuntimeError("prebrief store unavailable")
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield self
+        except BaseException:
+            try:
+                self._conn.execute("ROLLBACK")
+            except Exception as e:
+                print(f"prebrief rollback err: {e}", file=sys.stderr)
+            raise
+        self._conn.execute("COMMIT")
 
     def project_of(self, agent_id):
         """The project an agent is enrolled in. 'default' when unknown."""
