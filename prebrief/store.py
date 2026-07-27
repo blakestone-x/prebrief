@@ -351,3 +351,52 @@ class Store:
         except Exception:
             pass
         self._conn = None
+
+
+def project_from_path(path, explicit=None):
+    """Stable tenant identity for a working directory — host-independent.
+
+    Two failure modes this closes:
+
+    1. `os.path.basename` uses the HOST's separator, so a Windows-captured cwd
+       read on Linux yielded `Cdevprebrief` instead of `prebrief` — the same
+       repo got a different tenant identity depending on which OS observed it.
+       Real isolation bug on a synced fleet, and it turned CI red. Split on
+       BOTH separators and drop drive letters.
+    2. A basename is not a stable ID: two repos named `web` under different
+       parents collide, and renaming a directory silently re-tenants its
+       history. So an explicit label always wins — PREBRIEF_PROJECT in the
+       environment, or a `.prebrief-project` file in the directory.
+    """
+    try:
+        if explicit:
+            return norm_project(_sanitize(explicit))
+        env = os.environ.get("PREBRIEF_PROJECT")
+        if env:
+            return norm_project(_sanitize(env))
+        raw = str(path or "")
+        if raw:
+            marker = os.path.join(raw, ".prebrief-project")
+            try:
+                if os.path.isfile(marker):
+                    with open(marker, encoding="utf-8") as fh:
+                        label = fh.read().strip().splitlines()[0] if fh else ""
+                    if label:
+                        return norm_project(_sanitize(label))
+            except Exception:
+                pass
+        # host-independent: treat / and \ as separators regardless of platform
+        parts = [p for p in raw.replace("\\", "/").split("/") if p]
+        if parts and len(parts[-1]) == 2 and parts[-1].endswith(":"):
+            parts.pop()                      # bare drive letter, e.g. "C:"
+        base = parts[-1] if parts else ""
+        if len(base) == 2 and base.endswith(":"):
+            base = ""
+        return norm_project(_sanitize(base)) if base else DEFAULT_PROJECT
+    except Exception:
+        return DEFAULT_PROJECT
+
+
+def _sanitize(label):
+    """Conservative charset: the label is rendered into agent context."""
+    return "".join(c for c in str(label) if c.isalnum() or c in "-_.")[:64]

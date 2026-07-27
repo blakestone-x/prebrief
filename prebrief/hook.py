@@ -37,10 +37,9 @@ def _project(ev):
     as a bound parameter, but it is also rendered into agent context).
     """
     try:
+        from .store import project_from_path
         cwd = str(ev.get("cwd") or ev.get("project_dir") or os.getcwd())
-        base = os.path.basename(os.path.normpath(cwd))
-        safe = "".join(c for c in base if c.isalnum() or c in "-_.")[:64]
-        return safe or "default"
+        return project_from_path(cwd)
     except Exception:
         return "default"
 

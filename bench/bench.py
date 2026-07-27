@@ -232,6 +232,20 @@ def seed(store):
                             {"traversal": True, "q": q})
             counts["traversals"] += 1
             counts["events"] += 1
+    # Report what the store actually HOLDS. The event hash collapses identical
+    # repeats by design, so counting insert attempts overstates the corpus
+    # (an independent review caught 74 claimed vs 68 real).
+    for key, q in (("events", "SELECT COUNT(*) FROM events"),
+                   ("tool_events", "SELECT COUNT(*) FROM tool_events"),
+                   ("builds", "SELECT COUNT(*) FROM plan_node WHERE kind='goal'"),
+                   ("decisions", "SELECT COUNT(*) FROM decision")):
+        try:
+            r = store.sql(q)
+            if r:
+                counts[key] = int(r[0][0])
+        except Exception:
+            pass
+    counts["note"] = "counts are rows present after dedupe, not inserts attempted"
     return counts
 
 
