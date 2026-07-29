@@ -166,6 +166,12 @@ via a bundled synthetic-fleet benchmark.
   until live SessionStart, PostToolUse, and Stop propagation pass in both the
   parent directory and a fresh worktree.
 
+**Trial status (2026-07-29).** Both live propagation gates passed. The
+worktree-only experiment opened at 2026-07-29 15:24:03 UTC with the complete
+configuration above frozen and zero initial assignments. The earliest
+full-duration analysis is 2026-08-12 15:24:03 UTC; reaching that date does not
+waive the independent 170-sessions-per-arm power floor.
+
 
 ## Honest scope of the cold-start result
 
