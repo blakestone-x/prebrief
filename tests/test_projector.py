@@ -130,15 +130,44 @@ class TestProjector(unittest.TestCase):
         self.assertEqual(projector.snapshot(s), before,
                          "replaying folded events duplicated rows")
 
+    def test_claim_retraction_is_log_first_and_rebuildable(self):
+        s = fresh()
+        ids = seed(s)
+        projector.project_events(s)
+        claim_id = s.sql(
+            "SELECT id FROM claim WHERE asserted_by=?", (ids["claim"],))[0][0]
+
+        event_id = client.retract_claim(
+            s, "reviewer", "s2", claim_id, reason="verification artifact")
+        self.assertTrue(event_id)
+        self.assertEqual(
+            s.sql("SELECT status FROM claim WHERE id=?", (claim_id,)),
+            [("asserted",)],
+            "the emitter must not mutate the projection directly")
+
+        projector.project_events(s)
+        self.assertEqual(
+            s.sql("SELECT status FROM claim WHERE id=?", (claim_id,)),
+            [("retracted",)])
+        incremental = projector.snapshot(s)
+        projector.rebuild(s)
+        self.assertEqual(projector.snapshot(s), incremental)
+
     # ------------------------------------------------------------------ (c)
     def test_rebuild_reproduces_identical_projections(self):
         s = fresh()
         ids = seed(s)
+        projector.project_events(s)
+        claim_id = s.sql(
+            "SELECT id FROM claim WHERE asserted_by=?", (ids["claim"],))[0][0]
         s.event("session.start", "builder-a", "s1",
                 {"role": "builder", "task": "write the fold"})
         client.set_plan_status(s, "builder-a", "s1", ids["task"], "done")
         client.supersede_decision(s, "orchestrator", "s1", ids["decision"],
                                   reason="moved to postgres")
+        client.retract_claim(
+            s, "orchestrator", "s1", claim_id,
+            reason="superseded by implementation")
         s.event("session.end", "builder-a", "s1", {})
         projector.project_events(s)
 
@@ -147,7 +176,7 @@ class TestProjector(unittest.TestCase):
                         "nothing projected — the comparison would be vacuous")
 
         out = projector.rebuild(s)
-        self.assertEqual(out["events"], 9, out)
+        self.assertEqual(out["events"], 10, out)
         self.assertEqual(projector.snapshot(s), incremental,
                          "rebuild did not reproduce the incremental fold")
 
@@ -162,6 +191,9 @@ class TestProjector(unittest.TestCase):
         self.assertEqual(
             s.sql("SELECT status FROM awareness WHERE agent_id='builder-a'"),
             [("idle",)])
+        self.assertEqual(
+            s.sql("SELECT status FROM claim WHERE id=?", (claim_id,)),
+            [("retracted",)])
 
     def test_rebuild_drops_rows_that_never_hit_the_log(self):
         """A direct write is not derivable, so it must not survive a rebuild.

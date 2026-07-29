@@ -32,6 +32,7 @@ Event kinds folded:
   decision.make    -> decision row (id = event id unless payload.decision_id)
   decision.supersede -> decision.status='superseded'
   claim.assert     -> claim row (natural key: asserted_by = event id)
+  claim.retract    -> claim.status='retracted'
   session.start    -> awareness upsert (status='active')
   session.end      -> awareness upsert (status='idle')
 Anything else (e.g. 'observation') is counted as skipped and ignored — an
@@ -430,6 +431,21 @@ def _fold_claim_assert(ctx, eid, ts, kind, actor, payload, project):
     ctx.counts["claim"] += 1
 
 
+def _fold_claim_retract(ctx, eid, ts, kind, actor, payload, project):
+    table = _claims_table(ctx)
+    claim_id = _int_or(
+        payload.get("claim") or payload.get("claim_id")
+        or payload.get("target"), None)
+    if claim_id is None:
+        ctx.counts["skipped"] += 1
+        return
+    if not _tenant_ok(ctx, table, claim_id, project):
+        return
+    where, params = _scoped(ctx, table, claim_id, project)
+    ctx.write(f"UPDATE {table} SET status='retracted' WHERE {where}", params)
+    ctx.counts["claim"] += 1
+
+
 def _fold_session(ctx, eid, ts, kind, actor, payload, project):
     active = kind == "session.start"
     row = {
@@ -462,6 +478,7 @@ _HANDLERS = {
     "decision.make": _fold_decision_make,
     "decision.supersede": _fold_decision_supersede,
     "claim.assert": _fold_claim_assert,
+    "claim.retract": _fold_claim_retract,
     "session.start": _fold_session,
     "session.end": _fold_session,
 }

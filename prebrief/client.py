@@ -281,3 +281,16 @@ def assert_claim(store, actor, session, subject, predicate, body="",
     except Exception as e:
         print(f"prebrief assert_claim err: {e}", file=sys.stderr)
         return 0
+
+
+def retract_claim(store, actor, session, claim_id, reason="",
+                  project=DEFAULT_PROJECT):
+    """Emit a `claim.retract` event, retiring one projected claim."""
+    try:
+        return store.event("claim.retract", actor, session, {
+            "claim": int(claim_id),
+            "reason": str(reason or "")[:300],
+        }, project=norm_project(project))
+    except Exception as e:
+        print(f"prebrief retract_claim err: {e}", file=sys.stderr)
+        return 0
