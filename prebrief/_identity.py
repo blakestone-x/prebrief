@@ -16,7 +16,7 @@ def _clean(label):
 def project_from_path(path, explicit=None, env=None, marker_reader=None):
     """Host-independent, stable tenant label.
 
-    explicit        an caller-supplied label always wins
+    explicit        a caller-supplied label always wins
     env             mapping to read SG_PROJECT / PREBRIEF_PROJECT from
     marker_reader   callable(dir) -> label or None, for `.prebrief-project`
 
