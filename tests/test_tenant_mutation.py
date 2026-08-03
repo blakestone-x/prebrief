@@ -10,8 +10,9 @@ These tests are the wall:
 
   (a) a Bravo event cannot mark Alpha's plan node done
   (b) a Bravo event cannot supersede Alpha's decision
-  (c) same-project transitions still work (the guard is not a blanket refusal)
-  (d) the refusal is observable — counted, not silently dropped
+  (c) a Bravo event cannot retract Alpha's claim
+  (d) same-project transitions still work (the guard is not a blanket refusal)
+  (e) the refusal is observable — counted, not silently dropped
 
 Run: python tests/test_tenant_mutation.py
 """
@@ -126,6 +127,26 @@ class TestCrossTenantMutation(unittest.TestCase):
             s.sql("SELECT choice, project FROM decision WHERE id=?", (did,)),
             [("sqlite WAL", "alpha")])
         self.assertEqual(counts["cross_tenant"], 2, counts)
+
+    def test_other_project_cannot_retract_a_claim(self):
+        s = fresh()
+        asserted = client.assert_claim(
+            s, "alpha-lead", "sA", "identity.py", "fails_when",
+            body="Host-native basename splits tenants", project="alpha")
+        projector.project_events(s)
+        claim_id = one(
+            s, "SELECT id FROM claim WHERE asserted_by=?", (asserted,))
+
+        client.retract_claim(
+            s, "bravo-lead", "sB", claim_id,
+            reason="not yours", project="bravo")
+        counts = projector.project_events(s)
+
+        self.assertEqual(
+            one(s, "SELECT status FROM claim WHERE id=?", (claim_id,)),
+            "asserted")
+        self.assertEqual(counts["cross_tenant"], 1, counts)
+        self.assertEqual(counts["claim"], 0, counts)
 
     # ------------------------------------------------------------------ (c)
     def test_same_project_transitions_still_work(self):

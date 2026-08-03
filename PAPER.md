@@ -135,22 +135,42 @@ via a bundled synthetic-fleet benchmark.
 
 ## 8. Evaluation plan: two-week live A/B
 
-- **Arms.** A: Prebrief injection enabled (hooks live). B: hooks disabled,
-  agents rely on existing static briefs and on-demand search. Random
-  assignment per session at hook time; ~2 weeks, target ≥300 sessions/arm on
-  the production fleet.
-- **Primary metrics.** (1) redundant-work incidents per session (re-deriving
-  a recorded decision, re-exploring a mapped area — labeled by a fresh-context
-  judge with a mechanical pre-filter); (2) time-to-first-productive-action;
-  (3) injected tokens per session (cost side).
-- **Secondary.** Contract pass rate on handoffs; MAST-coded failure incidence;
-  operator interruptions ("ask Blake" events).
-- **Guards.** Pre-registered metric definitions; judge prompts frozen before
-  the run; generator≠evaluator (judging in fresh contexts, different model
-  tier); fail-open audit — any injection error auto-reassigns the session to
-  arm B and logs it.
-- **Analysis.** Per-session unit, cluster by project; report effect sizes with
-  bootstrap CIs; publish raw event exports alongside the paper.
+- **Unit and eligible population.** One Claude Code worktree session. Thin
+  parent-directory dispatch shells are excluded before assignment.
+- **Arms.** Control and treatment run identical capture hooks; only delivery
+  differs. Control receives no Prebrief payload. Treatment receives the normal
+  payload. Assignment is a deterministic hash of experiment ID and session ID,
+  persisted before composition so exposure cannot be selected after seeing the
+  payload.
+- **Primary endpoint.** Success without rework, using a pre-registered
+  mechanical proxy: the final real test command passes, no earlier test command
+  failed, and no path records repeated tool errors. Missing outcomes count as
+  failures in the intention-to-treat analysis. This proxy is narrower and more
+  reproducible than retrospective model judging, but it does not cover work
+  with no meaningful test command; that limitation will be reported directly.
+- **Secondary metrics.** Tool-error rate, session duration, and treatment
+  delivery compliance. Token use remains unreported until capture is verified
+  end to end.
+- **Power and duration.** Baseline success 0.50, minimum detectable absolute
+  lift 0.15, two-sided α=0.05, power=0.80: 170 assigned sessions per arm by a
+  two-proportion normal approximation. Fourteen elapsed days is an independent
+  publishability gate. Early or underpowered output must say
+  `UNDERPOWERED — do not report a result`.
+- **Guards.** The treatment content digest, eligibility scope, hypothesis,
+  endpoint, split, baseline, MDE, α, and power are frozen before assignment.
+  Treatment or scope drift fails closed: no context is delivered. Injection
+  failure never changes the assigned arm; analysis remains intention-to-treat.
+- **Analysis.** Report absolute lift and a Newcombe score interval for the
+  difference in proportions. The primary missing-outcome policy is failure;
+  complete-case exclusion is labeled sensitivity-only. The trial is not armed
+  until live SessionStart, PostToolUse, and Stop propagation pass in both the
+  parent directory and a fresh worktree.
+
+**Trial status (2026-07-29).** Both live propagation gates passed. The
+worktree-only experiment opened at 2026-07-29 15:24:03 UTC with the complete
+configuration above frozen and zero initial assignments. The earliest
+full-duration analysis is 2026-08-12 15:24:03 UTC; reaching that date does not
+waive the independent 170-sessions-per-arm power floor.
 
 
 ## Honest scope of the cold-start result
