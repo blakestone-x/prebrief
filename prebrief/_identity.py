@@ -41,6 +41,19 @@ def project_from_path(path, explicit=None, env=None, marker_reader=None):
                 pass
         # host-independent: BOTH separators, always. Never os.path.
         parts = [p for p in raw.replace("\\", "/").split("/") if p]
+        # A git worktree at <project>/.claude/worktrees/<slug> is the SAME
+        # tenant as the project it was cut from: the branch slug is ephemeral,
+        # the project is not. Without this, every worktree became its own
+        # tenant, so a worktree agent read an empty brief and the fleet's
+        # history fragmented one directory at a time.
+        # Scan ASCENDING and stop at the FIRST marker: a worktree cut from a
+        # worktree must resolve to the original project, not to the inner slug.
+        # Scanning backwards returned that slug and reintroduced exactly the
+        # per-worktree fragmentation this loop exists to prevent.
+        for i in range(1, len(parts)):
+            if parts[i - 1].lower() == ".claude" and parts[i].lower() == "worktrees":
+                parts = parts[: i - 1]
+                break
         if parts and len(parts[-1]) == 2 and parts[-1].endswith(":"):
             parts.pop()
         base = parts[-1] if parts else ""
