@@ -24,6 +24,11 @@ def _check(name, status, detail, fix=""):
 def run(store):
     """Return a list of check results. Never raises — a broken doctor is useless."""
     out = []
+    if getattr(store, "_conn", "unknown") is None:
+        out.append(_check(
+            "store.open", ERROR,
+            "database connection unavailable",
+            "check the database path and permissions"))
 
     # 1. schema/migration parity — the class behind the used_at regression
     try:
@@ -131,13 +136,22 @@ def run(store):
         import re
         import prebrief
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        pv = re.search(r'version\s*=\s*"([^"]+)"',
-                       open(os.path.join(root, "pyproject.toml"),
-                            encoding="utf-8").read()).group(1)
+        metadata_path = os.path.join(root, "pyproject.toml")
+        if os.path.isfile(metadata_path):
+            with open(metadata_path, encoding="utf-8") as metadata_file:
+                match = re.search(r'version\s*=\s*"([^"]+)"', metadata_file.read())
+            if match is None:
+                raise ValueError("version missing from pyproject.toml")
+            pv = match.group(1)
+            source = "pyproject"
+        else:
+            from importlib.metadata import version
+            pv = version("prebrief")
+            source = "installed distribution"
         agree = pv == prebrief.__version__
         out.append(_check(
             "release.version", OK if agree else ERROR,
-            f"package {prebrief.__version__}, pyproject {pv}",
+            f"package {prebrief.__version__}, {source} {pv}",
             "sync pyproject.toml, __init__.py and CITATION.cff" if not agree else ""))
     except Exception as e:
         out.append(_check("release.version", WARN, f"uncheckable: {e}"))

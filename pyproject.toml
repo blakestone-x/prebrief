@@ -12,6 +12,12 @@ license = { text = "MIT" }
 authors = [{ name = "Blake Stone" }]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/blakestone-x/prebrief"
+Repository = "https://github.com/blakestone-x/prebrief"
+Issues = "https://github.com/blakestone-x/prebrief/issues"
+Documentation = "https://github.com/blakestone-x/prebrief#readme"
+
 [project.scripts]
 prebrief = "prebrief.cli:main"
 

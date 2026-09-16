@@ -13,8 +13,8 @@ Subcommands:
   rebuild [--db PATH]                      wipe projections, replay the whole
                                            log (proves they are derived)
 
-Stdlib only. Every subcommand fails open: errors degrade to a smaller result
-and a stderr note, exit code 0.
+Stdlib only. Capture-oriented commands fail open with a stderr note.
+Doctor returns a nonzero exit code for diagnostic errors or failures.
 """
 import argparse
 import json
@@ -50,7 +50,7 @@ def _store(db=None):
 def _hook_command():
     """The command line enrolled into settings.json for this installation."""
     hook = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hook.py")
-    return f'python "{hook}"'
+    return f'"{sys.executable}" "{hook}"'
 
 
 def _is_ours(group):
@@ -111,7 +111,10 @@ def cmd_enroll(args):
 def cmd_doctor(args):
     """Self-diagnostics against the live database. Exit 1 on any ERROR."""
     from prebrief import doctor
-    text, code = doctor.report(_store(), as_json=getattr(args, "json", False))
+    text, code = doctor.report(
+        _store(getattr(args, "db", None)),
+        as_json=getattr(args, "json", False),
+    )
     print(text)
     return code
 
@@ -350,11 +353,12 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     try:
-        args.fn(args)
+        result = args.fn(args)
     except Exception as e:
         # Fail open: degrade to a stderr note, never a traceback to the caller.
         print(f"prebrief {args.cmd}: {e}", file=sys.stderr)
-    return 0
+        return 1 if args.cmd == "doctor" else 0
+    return int(result or 0)
 
 
 if __name__ == "__main__":

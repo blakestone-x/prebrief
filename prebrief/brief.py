@@ -20,14 +20,23 @@ from .store import norm_project, scope_clause
 
 BUDGET_CHARS = 5200   # ~1,300 tokens hard ceiling for the full brief
 
-_MANUAL = """
--- HOW TO GO DEEPER (the map is self-serve; do not load raw history) --
-  state of a build ......... store.sql("SELECT * FROM plan_node WHERE root_id=? OR id=?", (bid, bid))
-  standing rules ........... store.sql("SELECT * FROM decision WHERE status='standing'")
-  who else is here ......... store.sql("SELECT * FROM awareness WHERE status='active'")
-  risk for your files ...... store.sql("SELECT path, SUM(is_error), COUNT(*) FROM tool_events GROUP BY path")
-  raw depth ................ store.sql("SELECT * FROM events WHERE id > ?", (watermark,))
-  record what you learned .. client.traverse(store, me, question, refs)"""
+_SCOPED_MANUAL = """
+-- HOW TO GO DEEPER (project-scoped APIs) --
+  refresh this project brief ... prebrief.brief.full_brief(store, project="...")
+  compose a scoped payload ..... prebrief.inject.compose(..., project="...")
+  record a traversal ........... prebrief.client.traverse(..., project="...")
+  use the same explicit project label as this brief; raw inspection requires project/shared predicates."""
+
+_OPERATOR_MANUAL = """
+-- HOW TO GO DEEPER (operator view; project=None is intentionally all-project) --
+  inspect one project .......... prebrief.brief.full_brief(store, project="...")
+  compose a scoped payload ..... prebrief.inject.compose(..., project="...")
+  record a traversal ........... prebrief.client.traverse(..., project="...")
+  add project/shared predicates before raw inspection."""
+
+
+def _manual(project: str | None) -> str:
+    return _OPERATOR_MANUAL if project is None else _SCOPED_MANUAL
 
 
 def _ts(epoch=None):
@@ -114,8 +123,7 @@ def full_brief(store, project=None):
             tag = origin_tag(r[4], r[5], proj)
             out.append(
                 f"  {tag}build:{r[0]} \"{r[1]}\" open={int(r[2] or 0)} "
-                f"done={int(r[3] or 0)} "
-                f"(join: SELECT * FROM plan_node WHERE root_id={r[0]})")
+                f"done={int(r[3] or 0)}")
     except Exception:
         pass
 
@@ -159,7 +167,7 @@ def full_brief(store, project=None):
         out.append("\n-- FLEET ATTENTION (most-asked, 24h) --")
         out.extend(att)
 
-    out.append(_MANUAL)
+    out.append(_manual(proj))
     text = "\n".join(out)
     return text[:BUDGET_CHARS], wm
 

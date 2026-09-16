@@ -338,8 +338,7 @@ def _candidates(store, led, scoped, sp, project):
         if ref not in led:
             cands.append((ref, _cap(
                 f"{FB.origin_tag(r[3], r[4], project)}"
-                f"NEW BUILD build:{r[0]} \"{r[1]}\" [{r[2]}] "
-                f"(join: SELECT * FROM plan_node WHERE root_id={r[0]})"),
+                f"NEW BUILD build:{r[0]} \"{r[1]}\" [{r[2]}]"),
                 False))
     # attention shifts only: ledger keys the last-delivered snapshot hash
     att = FB.attention(store, limit=3, project=project)

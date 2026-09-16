@@ -8,6 +8,7 @@ emits additionalContext JSON where the event allows it.
 Fails open: any error -> empty output on stdout, a note on stderr, exit 0.
 The agent always proceeds.
 """
+import hashlib
 import json
 import os
 import sys
@@ -29,19 +30,23 @@ def _db_path():
 
 
 def _project(ev):
-    """Tenant label for this hook event: the basename of the event's cwd.
+    """Resolve the event's explicit project label or cwd basename.
 
-    Each enrolled project is its own tenant, so one project's captured text can
-    never be composed into another project's agent context. Unusable cwd ->
-    'default'. Sanitized to a conservative charset (the label reaches SQL only
-    as a bound parameter, but it is also rendered into agent context).
+    Explicit labels avoid basename collisions and keep worktree identity stable.
+    Labels scope composition; they are not a database access-control boundary.
     """
     try:
-        from .store import project_from_path
+        from prebrief.store import project_from_path
         cwd = str(ev.get("cwd") or ev.get("project_dir") or os.getcwd())
         return project_from_path(cwd)
     except Exception:
         return "default"
+
+
+def _agent_id(project: str, session: str) -> str:
+    """Stable recipient identity using the project and complete session ID."""
+    material = f"{project}\0{session}".encode("utf-8", "replace")
+    return "cc-" + hashlib.sha256(material).hexdigest()
 
 
 def _emit(event_name, context):
@@ -63,9 +68,9 @@ def main():
 
         store = Store(_db_path())
         name = ev.get("hook_event_name", "")
-        sess = str(ev.get("session_id", "unknown"))[:36]
-        agent = "cc-" + sess[:8]
+        sess = str(ev.get("session_id", "unknown"))
         proj = _project(ev)
+        agent = _agent_id(proj, sess)
 
         if name == "SessionStart":
             client.register(store, agent, sess, "builder",

@@ -1,166 +1,184 @@
-# The Moving Target: delivery-aware context orchestration for multi-agent fleets
+# The Moving Target
 
-*Short systems paper — outline and abstract draft.*
+## Delivery-aware context orchestration for multi-agent fleets
 
-## Abstract (draft)
+*Design note and research draft. The implementation is public; the historical
+private-fleet study is not independently reproducible from this repository.*
 
-Multi-agent coding fleets fail less from weak models than from weak context
-plumbing: each new session starts blind, and the common remedies — dumping raw
-transcripts or re-sending a static summary — spend the context budget on noise
-or repetition. We present Prebrief, a context orchestrator built on three
-mechanisms: (1) a *fleet brief* rendered as a live projection over an
-append-only event store, carrying its own watermark and a traversal manual so
-the payload doubles as the map's user guide; (2) a per-agent *delivery ledger*
-that records every item an agent has been sent, so subsequent payloads contain
-only the difference — the "moving target"; and (3) *task-aware inlining*, in
-which the composer follows pointers on the agent's behalf when its stated task
-matches an open build. On a live production substrate of ~6,600 agent
-sessions, a fresh agent answering fleet-history questions from the composed
-map reached 1.000 accuracy versus 0.750 for an agent permitted to compute over the raw corpus, and 0.188 for keyword-retrieved snippets, at
-a comparable context budget (n=32 cells); structured handoffs at an equal
-700-token budget passed 0.907 of contract checks versus 0.859 for prose and
-halved successor rework (5 vs 10 items, n=18 pipelines); payload composition
-runs in 0.5–1.1 s full and 0.12–0.46 s delta, with second-payload size
-collapsing from 2,425 to 130 characters under ledger dedupe. The full system
-passed a 9/9 end-to-end live proof including injection into a production
-Claude Code session. Prebrief is open source, stdlib-only, and reproducible
-via a bundled synthetic-fleet benchmark.
+## Abstract
 
-## 1. Introduction
+An agent joining ongoing work needs current plans, standing decisions, and
+recent activity. Repeatedly sending the same context consumes a limited
+window; retrieving raw history asks the recipient to reconstruct state.
+Prebrief explores recipient-aware context delivery using a SQLite event log,
+derived plan and decision state, and a delivery ledger. First contact gets a
+project brief with task-matched details. Later calls use recorded references
+and event watermarks to compose updates.
 
-- The fleet-context problem: N concurrent agents, each with a bounded window,
-  sharing one evolving body of work. Coordination failures dominate observed
-  breakdowns (cf. MAST's failure taxonomy, arXiv 2503.13657).
-- Existing remedies and their costs: transcript dumps (token-expensive,
-  low signal), static CLAUDE.md-style briefs (stale, sender-oblivious),
-  memory stores queried on demand (agent must know to ask).
-- Thesis: the payload should be computed per-recipient from (fleet state) −
-  (what this recipient was already delivered), and refreshed as a projection,
-  not maintained as a document.
+The public implementation includes an offline example, regression tests, and
+a synthetic benchmark. A checked-in run reduced a second payload from 4,044
+to 651 characters. Historical observations from a separate Postgres system
+motivate further study, but do not establish causal improvements in live
+agent outcomes. [Evaluation and reproducibility](EVALUATION.md) records the
+available evidence, corrected sample counts, and missing artifacts.
 
-## 2. Motivation: work is decomposable, context is the bottleneck
+## 1. Problem and scope
 
-- Decision-level decomposability study: across n=72 sampled work segments,
-  a mean 0.45 fraction of decision points were resolvable from recorded fleet
-  state alone (no new exploration) — the information usually existed, but was
-  not in the window of the agent that needed it.
-- Corollary: raising delivery precision, not raising model capability, is the
-  cheapest available lift for fleet throughput.
+Concurrent agents often need information that another session has already
+produced. A transcript retains the conversation but does not directly expose
+the current plan, the standing decision, or what a particular recipient has
+already seen. A static brief is inexpensive to consume but must be refreshed.
 
-## 3. Contributions
+The design question is whether a small delivery layer can make this state
+available at session boundaries and subsequent prompts while limiting
+repeated material. Prebrief implements capture, projection, and composition.
+It does not schedule agent work, resolve conflicting edits, or replace the
+agent's own reasoning and verification.
 
-1. **Delivery-aware composition (the moving target).** A per-agent ledger
-   keyed (agent_id, item_ref, watermark) that makes injection idempotent:
-   first contact receives the full brief plus task-aware inlining; every later
-   contact receives only events past the agent's watermark, never-delivered
-   decisions and builds, and current fleet attention — degenerating to a
-   one-line "fleet unchanged" when nothing moved. Measured second-blink
-   dedupe: 2,425 → 130 chars.
-2. **Handoff-fidelity result.** At an equal 700-token budget, structured
-   (typed, decision/plan-shaped) handoffs outperform prose summaries on
-   contract pass rate (0.907 vs 0.859) and halve successor rework (5 vs 10
-   items, n=18 pipelines) — evidence that *shape*, not just size, of injected
-   context matters.
-3. **Map-vs-dump cold-start result + system design.** A fresh agent answering
-   ground-truth questions about its fleet's real history scored 1.000 from the
-   composed map versus 0.750 from a compute-capable agent baseline (which ties the map on corpus-computable questions but scores 0.000 on coordination-state questions) and 0.188 from keyword-retrieved snippets
-   (n=32 cells, ~1,150 vs ~1,670 tokens) — and the full design (capture →
-   store → projection → delivery-aware injection, all failing open) survived a
-   9/9 live end-to-end proof on a production harness.
+## 2. Design
 
-## 4. Design
+### Event log and projections
 
-- Event store: append-only, content-hash deduped, SQLite WAL (production
-  variant: Postgres). Tables: events, plan_node, decision, awareness,
-  delivery, tool_events.
-- Projections, not documents: full_brief/delta_brief rendered on demand with
-  watermark and freshness header; sections for live agents, active builds
-  (with join hints), standing decisions, risk surface (tool error rates),
-  fleet attention (24h traversal frequency), and a traversal manual.
-- Composer: ledger diff, task-aware inlining, hard character budget, optional
-  local-model curation with deterministic truncation fallback.
-- Fail-open discipline: every component degrades to smaller output; no error
-  ever reaches the agent's session.
+Log-first client functions append plan and decision events. The projector
+folds them into queryable tables, updating its cursor in the same transaction
+as the projection writes. Rebuilds replay that log. Tool telemetry and
+high-frequency presence also have direct-write paths; not all stored state
+is reconstructed from the event log.
+
+Deprecated direct plan and decision helpers remain for compatibility.
+Their projection rows have no corresponding event and are removed by a
+rebuild. New integrations should use the log-first functions and explicitly
+run the projector.
+
+### Delivery-aware composition
+
+A delivery ledger keyed by `(agent_id, item_ref)` tracks rendered items and
+an event watermark. The first-contact path composes a brief; subsequent calls
+page new events and consider undelivered decisions and builds. Task matching
+can inline an open build and its decisions.
+
+The composer fits content to character budgets and records references that
+survive rendering. Budget pressure can leave items pending for later calls.
+It can attempt local-model curation for oversized deltas, with a deterministic
+fallback.
+
+These are emission records, not a transport acknowledgment or exactly-once
+delivery protocol. A harness may fail after composition, and concurrent
+compositions for the same recipient are not a serialized delivery protocol.
+Use a fresh recipient ID for a fresh context: the `session` argument does
+not independently partition the ledger.
+
+### Project scoping
+
+Composer queries and projector mutations use project labels. Explicitly
+shared rows can cross project scopes and carry an origin label. Project
+identity should be explicit and stable across worktrees; basename inference
+alone can collide.
+
+This is a scoping convention inside a trusted local system. It is not an
+authorization boundary against a process that can open the database, nor a
+guarantee that a model will obey the untrusted-data envelope.
+
+### Failure behavior
+
+Capture and composition generally fail open so a broken context layer does
+not stop the observed agent. Operators must inspect diagnostics and stderr;
+successful hook exit is not evidence of successful capture. Projector
+transactions use raising writes internally so a failed fold can roll back
+without advancing the cursor. The diagnostic CLI reports a nonzero exit for
+detected errors.
+
+## 3. Implementation
+
+The runtime is Python 3.10+ with SQLite and standard-library modules.
+There is no required server or runtime package dependency. The included
+Claude Code adapter handles lifecycle, prompt, and tool hooks. Other
+harnesses can use the Python API; this repository does not ship a Codex
+enrollment adapter.
+
+Source entry points:
+
+- [store.py](prebrief/store.py): schema, migration, and storage contracts.
+- [client.py](prebrief/client.py): capture and log-first event emitters.
+- [projector.py](prebrief/projector.py): incremental folding and rebuilds.
+- [brief.py](prebrief/brief.py) and [inject.py](prebrief/inject.py): projections,
+  candidate selection, budgets, and emission tracking.
+- [hook.py](prebrief/hook.py) and [cli.py](prebrief/cli.py): integration.
+- [examples/quickstart.py](examples/quickstart.py): a small end-to-end API example.
+
+## 4. Evidence
+
+### Public mechanism checks
+
+The synthetic workload exercises local composition and repeated-payload
+size. The checked-in run reports 4,044 → 651 characters, a 6.2× ratio.
+Absolute latency and payload size depend on workload and environment.
+The test suite exercises implementation invariants and failure cases.
+Neither microbenchmarks nor passing tests measure an agent's downstream
+productivity.
+
+### Historical private observations
+
+The corrected author report uses 48 cold-start cells and 24 handoff pipelines.
+On six questions answerable from raw history, both the map and a
+compute-capable baseline score 1.000; the reported difference is context cost
+and elapsed time. Two other questions require coordination or derived state
+absent from the baseline corpus. That is an information-coverage difference,
+not evidence of better reasoning.
+
+The handoff comparison reports 0.930 vs 0.854 contract pass rates under an
+equal 700-token budget. It is small, partly model-judged, and drawn from one
+operator's fleet. The [evidence notes](EVALUATION.md) preserve the full
+corrected table and clarify the one-sided sign-test value. Earlier draft
+numbers are superseded there.
+
+The raw fleet corpus, outputs, and complete study analysis are not published
+here. The public synthetic LLM probe uses a raw-snippet baseline and cannot
+reproduce the compute-capable comparison.
 
 ## 5. Related work
 
-- **Zep / Graphiti** (arXiv 2501.13956): temporal knowledge-graph memory for
-  agents; shares the "state as graph, queried at need" stance but is
-  pull-based — Prebrief adds recipient-aware push with a delivery ledger.
-- **Mem0 junk audit / verbatim-beats-extraction** (arXiv 2601.00821):
-  extraction-based memories accumulate junk and lose to verbatim retrieval;
-  motivates our projection-over-raw-events design — nothing is paraphrased
-  into a store that can rot.
-- **LLMCompiler** (arXiv 2312.04511): planner-driven parallel execution; we
-  borrow the "orchestrator does the routing work for the worker" instinct and
-  apply it to context (task-aware inlining) rather than tool calls.
-- **Language Model Teams as Distributed Systems** (arXiv 2603.12229): frames
-  agent teams with distributed-systems primitives; the delivery ledger is our
-  answer to their exactly-once-delivery concern for context.
-- **ActiveGraph** (arXiv 2605.21997): active, self-updating graph memory;
-  closest in spirit to the moving-target brief, but per-agent delivery state
-  is absent.
-- **PROJECTMEM** (arXiv 2606.12329): project-scoped memory for coding agents;
-  complementary — Prebrief handles the cross-agent delivery layer above such
-  a store.
-- **CodeCRDT** (arXiv 2510.18893): conflict-free replicated shared state for
-  concurrent coding agents; addresses write-write conflicts where Prebrief
-  addresses read-side awareness.
-- **MAST** (arXiv 2503.13657): multi-agent failure taxonomy; supplies the
-  failure classes (inter-agent misalignment, lost context) our mechanisms
-  target, and the evaluation vocabulary for the planned A/B.
+These references provide context for the design, not evidence that Prebrief
+outperforms their systems. No head-to-head comparison is claimed.
 
-## 6. Evaluation
+- [Zep: A Temporal Knowledge Graph Architecture for Agent Memory](https://arxiv.org/abs/2501.13956)
+  studies temporal memory and retrieval for agents.
+- [Fidelity Before Structure](https://arxiv.org/abs/2601.00821)
+  examines information loss when extracted artifacts replace verbatim
+  conversation memory. Its findings motivate retaining provenance; they do
+  not imply that this package preserves full transcripts.
+- [An LLM Compiler for Parallel Function Calling](https://arxiv.org/abs/2312.04511)
+  addresses planned execution of parallel tool calls, an execution concern
+  adjacent to context delivery.
+- [Language Model Teams as Distributed Systems](https://arxiv.org/abs/2603.12229)
+  offers distributed-systems concepts for reasoning about agent teams.
+- [The Log is the Agent](https://arxiv.org/abs/2605.21997)
+  explores event-sourced reactive graphs for auditable agent systems.
+- [PROJECTMEM](https://arxiv.org/abs/2606.12329)
+  explores local, event-sourced memory for coding agents.
+- [CodeCRDT](https://arxiv.org/abs/2510.18893)
+  investigates coordination for multi-agent code generation.
+- [Why Do Multi-Agent LLM Systems Fail?](https://arxiv.org/abs/2503.13657)
+  introduces MAST, a taxonomy of failure modes useful when designing
+  evaluations of agent systems.
 
-- Reported: decomposability probe (n=72), handoff experiment (n=18 pipelines,
-  judged contract checks), map-vs-dump (n=32 cells, mechanical grading),
-  latency/dedupe microbenchmarks, 9/9 live proof.
-- Reproducibility: bundled synthetic-fleet bench (bench/bench.py) reproduces
-  the mechanisms locally without network; --llm mode replays map-vs-dump
-  against Ollama or the Anthropic API.
+## 6. Limitations and next evaluation
 
-## 7. Limitations
+The current implementation assumes cooperating agents, stable explicit
+identity, and a trusted local store. It does not enforce prompt-injection
+resistance, maintain a verified downstream receipt protocol, or automatically
+reset context after compaction. It also relies on callers to run projections
+and to emit structured plans and decisions.
 
-- Small n throughout (72 segments, 18 pipelines, 32 cells); confidence
-  intervals are wide and effect sizes should be read as directional.
-- Single fleet, single harness family (Claude Code + Codex on one
-  operator's substrate); external validity untested.
-- Judge noise: handoff contract checks use an LLM judge for a subset of
-  criteria; mechanical grading covers map-vs-dump only.
-- Map arm advantage partially reflects that the brief's projections were
-  designed by the same authors who wrote the questions; the live A/B below is
-  the corrective.
-- No adversarial or malicious-agent setting; delivery ledger assumes honest
-  actors.
+The historical study is small and private, and its task selection and
+projection design came from the same authors. External validity, effects
+under concurrency, and long-term operating costs remain open questions.
+Heuristic tool-signal matches in `mark_used` should be reported as engagement
+signals, not as proof that the model understood the context.
 
-## 8. Evaluation plan: two-week live A/B
-
-- **Arms.** A: Prebrief injection enabled (hooks live). B: hooks disabled,
-  agents rely on existing static briefs and on-demand search. Random
-  assignment per session at hook time; ~2 weeks, target ≥300 sessions/arm on
-  the production fleet.
-- **Primary metrics.** (1) redundant-work incidents per session (re-deriving
-  a recorded decision, re-exploring a mapped area — labeled by a fresh-context
-  judge with a mechanical pre-filter); (2) time-to-first-productive-action;
-  (3) injected tokens per session (cost side).
-- **Secondary.** Contract pass rate on handoffs; MAST-coded failure incidence;
-  operator interruptions ("ask Blake" events).
-- **Guards.** Pre-registered metric definitions; judge prompts frozen before
-  the run; generator≠evaluator (judging in fresh contexts, different model
-  tier); fail-open audit — any injection error auto-reassigns the session to
-  arm B and logs it.
-- **Analysis.** Per-session unit, cluster by project; report effect sizes with
-  bootstrap CIs; publish raw event exports alongside the paper.
-
-
-## Honest scope of the cold-start result
-
-Against a baseline permitted to run read-only commands over the parsed corpus,
-the map's accuracy advantage on *corpus-computable* questions disappears
-(1.000 vs 1.000 on 6 of 8). The advantages that survive are cost (6.5x fewer
-context tokens, 2.9x lower wall-clock, because the computation is already done)
-and coverage (the compute-capable agent scores 0.000 on questions whose answers
-live in coordination state or in derived fields absent from raw history —
-verified by checking the corpus directly, not inferred from the failure).
-Claims in this paper are scoped accordingly: the contribution is cheap,
-complete fleet-state delivery, not superior reasoning.
+A prospective live evaluation should hold capture constant, freeze eligibility
+and outcomes before assignment, and keep injection failures in their original
+arm for intention-to-treat analysis. Duration and sample-size gates should be
+independent. Missing outcomes and delivery compliance must be reported.
+The [evaluation notes](EVALUATION.md) link the existing draft trial proposal;
+no current trial completion or effectiveness result is asserted here.
