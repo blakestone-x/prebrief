@@ -176,8 +176,8 @@ their context. There is no bundled Codex enrollment adapter.
 
 ## Evidence and boundaries
 
-The [checked-in synthetic run](bench/bench_results.json) recorded **4,044 →
-651 characters (6.2× smaller)** between its first and second payloads.
+The [checked-in synthetic run](bench/bench_results.json) recorded **3,661 →
+651 characters (5.6× smaller)** between its first and second payloads.
 That is a payload-size observation on a seeded workload, not an agent
 productivity result or a universal compression ratio.
 

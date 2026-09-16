@@ -16,7 +16,7 @@ project brief with task-matched details. Later calls use recorded references
 and event watermarks to compose updates.
 
 The public implementation includes an offline example, regression tests, and
-a synthetic benchmark. A checked-in run reduced a second payload from 4,044
+a synthetic benchmark. A checked-in run reduced a second payload from 3,661
 to 651 characters. Historical observations from a separate Postgres system
 motivate further study, but do not establish causal improvements in live
 agent outcomes. [Evaluation and reproducibility](EVALUATION.md) records the
@@ -111,7 +111,7 @@ Source entry points:
 ### Public mechanism checks
 
 The synthetic workload exercises local composition and repeated-payload
-size. The checked-in run reports 4,044 → 651 characters, a 6.2× ratio.
+size. The checked-in run reports 3,661 → 651 characters, a 5.6× ratio.
 Absolute latency and payload size depend on workload and environment.
 The test suite exercises implementation invariants and failure cases.
 Neither microbenchmarks nor passing tests measure an agent's downstream

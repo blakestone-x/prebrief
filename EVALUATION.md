@@ -27,14 +27,18 @@ events. It measures local projection/composition latency and payload size.
 
 | Checked-in synthetic observation | Value |
 |---|---:|
-| First payload | 4,044 characters |
+| First payload | 3,661 characters |
 | Second payload | 651 characters |
-| Size ratio | 6.2× |
-| First-contact compose, median | 0.52 ms |
-| Delta compose, median | 0.08 ms |
+| Size ratio | 5.6× |
+| First-contact compose, median | 1.19 ms |
+| Delta compose, median | 0.15 ms |
 
-Source: [bench/bench_results.json](bench/bench_results.json). These are a
-historical example run, not freshly measured performance on your machine.
+Source: [bench/bench_results.json](bench/bench_results.json), generated on
+2026-09-16 at 13:38:56 UTC by GitHub Actions (Ubuntu, Python 3.12.14), from
+[source commit b5a58d6](https://github.com/blakestone-x/prebrief/commit/b5a58d6d6714a5c481ef7e28a77fd9a946b67802).
+The [CI run](https://github.com/blakestone-x/prebrief/actions/runs/35103251319)
+contains the logs and per-platform benchmark artifacts. These are measurements
+of that run, not a promise about performance on your machine.
 Character counts are not tokenizer measurements. Headers, timestamps,
 pending items, and budget choices affect the result. This workload does not
 establish scaling under contention or quantify downstream work saved.
