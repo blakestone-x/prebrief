@@ -1,6 +1,6 @@
 {
  "generated_at": "2026-09-16T13:38:56",
- "note": "synthetic-fleet approximation; production numbers in README.md come from the authors' live-fleet study",
+ "note": "synthetic-fleet approximation; production numbers in EVALUATION.md come from the authors' live-fleet study",
  "db": "/tmp/prebrief-bench-iwhgzem6/bench.db",
  "seed": {
   "sessions": 40,

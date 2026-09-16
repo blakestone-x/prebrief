@@ -14,7 +14,7 @@ equal character budget). Requires Ollama on 127.0.0.1:11434 or an
 ANTHROPIC_API_KEY in the environment.
 
 Numbers produced here are synthetic-fleet approximations; the production
-figures in README.md come from the authors' 6,600-session fleet study
+figures in EVALUATION.md come from the authors' 6,600-session fleet study
 (Postgres variant). Writes bench_results.json next to this file and prints
 a markdown table.
 
@@ -565,7 +565,7 @@ def main():
     results = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "note": ("synthetic-fleet approximation; production numbers in "
-                 "README.md come from the authors' live-fleet study"),
+                 "EVALUATION.md come from the authors' live-fleet study"),
         "db": db,
         "seed": counts,
         "seed_s": round(seed_s, 2),
