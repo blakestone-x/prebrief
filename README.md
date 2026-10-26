@@ -142,7 +142,7 @@ prebrief enroll /path/to/your/project
 ```
 
 On Windows, the project argument can be a quoted path such as
-`"C:\dev\my-project"`. Enrollment updates that project's
+`"C:\path\to\my-project"`. Enrollment updates that project's
 `.claude/settings.json`, preserves unrelated hook groups, and backs up
 existing settings. The generated command uses the enrolling Python interpreter;
 keep that environment in place, or remove and re-enroll after moving it.
